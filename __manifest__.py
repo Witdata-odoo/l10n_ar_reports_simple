@@ -2,7 +2,7 @@
 {
     'name': 'Argentinean Accounting IVA Simple Export',
     'version': '1.0',
-    'author': 'Odoo S.A.',
+    'author': 'Odoo S.A., witdata',
     'category': 'Accounting/Localizations/Reporting',
     'summary': 'IVA Simple Reporting for Argentinean Localization',
     'description': """
