@@ -5,10 +5,16 @@ from odoo import fields, models
 class AccountAccount(models.Model):
     _inherit = 'account.account'
 
+    fiscal_code = fields.Char(
+        string='Código fiscal',
+        related="company_id.account_fiscal_country_id.code"
+    )
     l10n_ar_arca_activity_id = fields.Many2one(
         'l10n_ar.arca.activity',
-        string='Associated ARCA Activity',
-        help="Argentina: This field is to associate a specific activity to use with this account. "
-        "If not set, the company's default activity will be used."
-        "The activity will be used to when generating ARCA VAT reports.",
+        string='Actividad ARCA asociada',
+        help=(
+            "Argentina: Este campo sirve para asociar una actividad específica a utilizar con esta cuenta."
+            "Si no se establece, se utilizará la actividad predeterminada de la compañía."
+            "La actividad se usará al generar los informes de IVA ARCA."
+        ),
     )

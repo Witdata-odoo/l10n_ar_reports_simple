@@ -8,12 +8,12 @@ class ARCAActivity(models.Model):
     _order = "code"
     _rec_names_search = ["name", "code"]
 
-    code = fields.Char(required=True, help="Activity Code")
-    name = fields.Char(required=True, help="Activity Description")
+    code = fields.Char(string="Código", required=True, help="Código de actividad")
+    name = fields.Char(string="Nombre", required=True, help="Descripción de la actividad")
 
     _sql_constraints = [
-        ('code_unique', 'unique(code)', 'Activity code must be unique'),
-        ('code_length', 'CHECK(LENGTH(code) <= 6)', 'Activity codes must be at most 6 characters long'),
+        ('code_unique', 'unique(code)', 'El código de actividad debe ser único.'),
+        ('code_length', 'CHECK(LENGTH(code) <= 6)', 'El código de actividad no puede tener más de 6 caracteres.'),
     ]
 
     @api.depends("code", "name")

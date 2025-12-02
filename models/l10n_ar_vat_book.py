@@ -16,7 +16,7 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
 
         # Add export button
         options['buttons'] += [
-            {'name': _('VAT Simple Report (ZIP)'), 'sequence': 31, 'action': 'export_file', 'action_param': 'vat_simple_export_files_to_zip', 'file_export_type': _('ZIP')},
+            {'name': _('Reporte de IVA Simple (ZIP)'), 'sequence': 31, 'action': 'export_file', 'action_param': 'vat_simple_export_files_to_zip', 'file_export_type': _('ZIP')},
         ]
 
     ####################################################
