@@ -215,7 +215,7 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                     ELSE 1
                 END)
                 """,
-                tag_id=tag_id.id,
+                tag_id=tuple(tag_id.ids),
             )
             columns_map["Debito Fiscal Facturado"] = 'vat_amount'
             columns_map["Debito Fiscal O.D.P."] = 'vat_amount'
