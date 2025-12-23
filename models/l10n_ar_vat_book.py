@@ -5,36 +5,83 @@ from csv import DictWriter
 
 from odoo import _, api, models
 from odoo.exceptions import RedirectWarning, UserError
-from odoo.tools import SQL
 
 
-class L10n_ArTaxReportHandler(models.AbstractModel):
-    _inherit = 'l10n_ar.tax.report.handler'
+class AccountGenericTaxReport(models.AbstractModel):
+    _inherit = 'account.generic.tax.report'
 
-    def _custom_options_initializer(self, report, options, previous_options=None):
-        super()._custom_options_initializer(report, options, previous_options=previous_options)
 
-        # Add export button
-        options.setdefault('buttons', []).append(
-            {'name': _('Reporte de IVA Simple (ZIP)'), 'sequence': 31, 'action': 'export_file', 'action_param': 'vat_simple_export_files_to_zip', 'file_export_type': _('ZIP')},
-        )
+    def _vat_book_get_selected_tax_types(self, options):
+        """Extract selected tax types from options.
+        
+        In Odoo 17, this is handled by the base module, but in Odoo 15
+        we need to extract it from the options dictionary.
+        """
+        tax_types = []
+        ar_vat_book_types = options.get('ar_vat_book_tax_types_available', {})
+        if ar_vat_book_types.get('sale', {}).get('selected'):
+            tax_types.append('sale')
+        if ar_vat_book_types.get('purchase', {}).get('selected'):
+            tax_types.append('purchase')
+        # If not specified, default to both
+        if not tax_types:
+            tax_types = ['sale', 'purchase']
+        return tax_types
 
     ####################################################
     # EXPORT/PRINT
     ####################################################
 
     def vat_simple_export_files_to_zip(self, options):
-        """ Export method that lets us export the IVA Simple Report to a zip archive.
-        It contains the files that we upload to ARCA for vat uploads.
-        Specification: https://www.afip.gob.ar/iva/responsables-inscriptos/ayuda/manuales.asp"""
+        """Button action that returns the download action for IVA Simple ZIP export.
+        
+        In Odoo 15, this method returns an action that triggers the download.
+        The actual ZIP generation is done in _get_vat_simple_zip method.
+        """
+        import json
         tax_types = self._vat_book_get_selected_tax_types(options)
 
         missing_fallback_activity = 'sale' in tax_types and not self.env.company.l10n_ar_arca_activity_id
         if missing_fallback_activity and not options.get('l10n_ar_simple_ignore_errors'):
-            report = self.env['account.report'].browse(options['report_id'])
             error_msg = _('Warning, activities are not set as a fallback on the company. As such the Sales VAT Simple files may be incorrect. Please set a fallback activity on the company or ignore this warning to generate the file anyway.')
-            action_vals = report.export_file({**options, 'l10n_ar_simple_ignore_errors': True}, 'vat_simple_export_files_to_zip')
+            new_options = dict(options)
+            new_options['l10n_ar_simple_ignore_errors'] = True
+            action_vals = self.vat_simple_export_files_to_zip(new_options)
             raise RedirectWarning(error_msg, action_vals, _('Generate VAT Simple Report'))
+
+        # Mark this as IVA Simple export
+        options['l10n_ar_simple_export'] = True
+        return {
+            'type': 'ir_actions_account_report_download',
+            'data': {
+                'model': self.env.context.get('model', 'account.generic.tax.report'),
+                'options': json.dumps(options),
+                'output_format': 'zip',
+                'financial_id': self.env.context.get('id'),
+            }
+        }
+
+    def _get_zip(self, options):
+        """Generate the ZIP file for IVA Simple export.
+        
+        This method is called by the account_reports controller when
+        output_format is 'zip'. We override it to generate our custom ZIP.
+        """
+        # Check if this is for IVA Simple export
+        if options.get('l10n_ar_simple_export'):
+            return self._get_vat_simple_zip(options)
+        # Otherwise, call parent method if it exists
+        if hasattr(super(), '_get_zip'):
+            return super()._get_zip(options)
+        return b''
+
+    def _get_vat_simple_zip(self, options):
+        """Generate the actual ZIP file content for IVA Simple export.
+        
+        It contains the files that we upload to ARCA for vat uploads.
+        Specification: https://www.afip.gob.ar/iva/responsables-inscriptos/ayuda/manuales.asp
+        """
+        tax_types = self._vat_book_get_selected_tax_types(options)
 
         file_types = [f"{tax}_{suffix}" for tax in tax_types for suffix in ['invoice', 'refund']]
         file_names = {
@@ -54,12 +101,7 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                 if file_data:
                     file_name = f"{file_names[file_type]}_{options['date']['date_to']}.csv"
                     zf.writestr(file_name, file_data)
-        file_content = stream.getvalue()
-        return {
-            'file_name': f"IVA_simple_{options['date']['date_to']}",
-            'file_content': file_content,
-            'file_type': 'zip',
-        }
+        return stream.getvalue()
 
     ####################################################
     # VAT SIMPLE HELPERS
@@ -131,8 +173,13 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
             # Additional column for vendor bills
             columns_map["Credito Fiscal Computable"] = 'vat_amount'
 
-        query = SQL(
-            """
+        lease_tag_id = self.env.ref("l10n_ar_reports_simple.tag_leases_rentals_account").id
+        fixed_tag_id = self.env.ref("l10n_ar_reports_simple.tag_fixed_asset_account").id
+
+        # Convert move_ids tuple to list for SQL IN clause
+        move_ids_list = list(move_ids) if move_ids else []
+
+        query = """
                 WITH move_lines_with_concept AS (
                     SELECT
                         aml.*,
@@ -154,7 +201,7 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                     LEFT JOIN account_tax bt ON amltr.account_tax_id = bt.id
                     LEFT JOIN account_tax_group btg ON bt.tax_group_id = btg.id
                     WHERE
-                        aml.move_id IN %(move_ids)s AND
+                        aml.move_id = ANY(%(move_ids)s) AND
                         btg.l10n_ar_vat_afip_code IN ('3', '4', '5', '6', '8', '9') AND
                         aml.partner_id IS NOT NULL
                 )
@@ -168,12 +215,11 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                 GROUP BY concept, rate_code
                 ORDER BY concept, rate_code;
             """
-        )
 
         self.env.cr.execute(query, {
-            'lease_tag_id': self.env.ref("l10n_ar_reports_simple.tag_leases_rentals_account").id,
-            'fixed_tag_id': self.env.ref("l10n_ar_reports_simple.tag_fixed_asset_account").id,
-            'move_ids': move_ids,
+            'lease_tag_id': lease_tag_id,
+            'fixed_tag_id': fixed_tag_id,
+            'move_ids': move_ids_list,
         })
         data = self.env.cr.dictfetchall()
 
@@ -200,82 +246,40 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
         }
         if file_type == 'sale_invoice':
             tag_id = self.env.ref("l10n_ar_reports_simple.tag_fixed_asset_account")
+            tag_ids_list = list(tag_id.ids)
+            # Build operation_type CASE with tag_ids
+            operation_type_case = """
+                (CASE
+                    WHEN btg.l10n_ar_vat_afip_code IN ('0', '1', '2') THEN 3
+                    WHEN aaat.account_account_tag_id = ANY(%(tag_ids)s) THEN 2
+                    ELSE 1
+                END)
+                """
             columns_map["Debito Fiscal Facturado"] = 'vat_amount'
             columns_map["Debito Fiscal O.D.P."] = 'vat_amount'
             exempt_operation_type = 3
-            query = SQL(
-                """
-                WITH move_lines_with_operation_type AS (
-                    SELECT
-                        aml.*,
-                        COALESCE(amlact.code, cmpact.code, '0') AS activity,
-                        (CASE
-                            WHEN btg.l10n_ar_vat_afip_code IN ('0', '1', '2') THEN 3
-                            WHEN aaat.account_account_tag_id = %(tag_id)s THEN 2
-                            ELSE 1
-                        END) AS operation_type,
-                        rprt.code as partner_responsibility_code,
-                        btg.l10n_ar_vat_afip_code,
-                        aaat.account_account_tag_id
-                    FROM account_move_line aml
-                    LEFT JOIN account_account acc ON aml.account_id = acc.id
-                    LEFT JOIN l10n_ar_arca_activity amlact ON acc.l10n_ar_arca_activity_id = amlact.id
-                    LEFT JOIN res_company cmp ON aml.company_id = cmp.id
-                    LEFT JOIN l10n_ar_arca_activity cmpact ON cmp.l10n_ar_arca_activity_id = cmpact.id
-                    LEFT JOIN account_account_account_tag aaat ON acc.id = aaat.account_account_id
-                    LEFT JOIN res_partner rp ON aml.partner_id = rp.id
-                    LEFT JOIN l10n_ar_afip_responsibility_type rprt ON rp.l10n_ar_afip_responsibility_type_id = rprt.id
-                    LEFT JOIN account_move_line_account_tax_rel amltr ON aml.id = amltr.account_move_line_id
-                    LEFT JOIN account_tax bt ON amltr.account_tax_id = bt.id
-                    LEFT JOIN account_tax_group btg ON bt.tax_group_id = btg.id
-                    WHERE
-                        btg.l10n_ar_vat_afip_code IS NOT NULL AND aml.move_id IN %(move_ids)s
-                )
-                SELECT
-                    activity,
-                    operation_type,
-                    operation_type = %(exempt_op_type)s AS is_exempt,
-                    CASE
-                        WHEN operation_type = %(exempt_op_type)s THEN ''
-                        WHEN partner_responsibility_code = '1' THEN '1'
-                        WHEN partner_responsibility_code IN ('6', '13') THEN '2'
-                        WHEN partner_responsibility_code IN ('4', '5', '7', '8', '9', '10', '16') THEN '3'
-                        ELSE ''
-                    END AS responsibility_type_code,
-                    CASE
-                        WHEN operation_type = %(exempt_op_type)s THEN ''
-                        ELSE l10n_ar_vat_afip_code
-                    END AS rate_code,
-                    CASE
-                        WHEN operation_type != %(exempt_op_type)s THEN ''
-                        ELSE REPLACE(ABS(SUM(balance))::TEXT, '.', ',')
-                    END AS exempt_balance,
-                    SUM(balance) AS balance,
-                    ARRAY_AGG(DISTINCT id) as aml_ids,
-                    ARRAY_AGG(DISTINCT move_id) as move_ids
-                FROM move_lines_with_operation_type
-                GROUP BY activity, operation_type, responsibility_type_code, rate_code
-                ORDER BY activity, operation_type, responsibility_type_code, rate_code;
-                """
-            )
-            query_params = {
-                'tag_id': tag_id.id,
-                'exempt_op_type': exempt_operation_type,
-                'move_ids': move_ids,
-            }
         else:
+            operation_type_case = """
+                (CASE
+                    WHEN btg.l10n_ar_vat_afip_code = ANY(%(code_values)s) THEN 2
+                    ELSE 1
+                END)
+                """
+            tag_ids_list = None
             columns_map["Debito Fiscal a Restituir"] = 'vat_amount'
             exempt_operation_type = 2
-            query = SQL(
-                """
+        columns_map["Monto Neto Exento o No Gravado"] = 'exempt_balance'
+
+        # Convert move_ids tuple to list for SQL
+        move_ids_list = list(move_ids) if move_ids else []
+        code_values = ['0', '1', '2']
+
+        query = """
                 WITH move_lines_with_operation_type AS (
                     SELECT
                         aml.*,
                         COALESCE(amlact.code, cmpact.code, '0') AS activity,
-                        (CASE
-                            WHEN btg.l10n_ar_vat_afip_code IN ('0', '1', '2') THEN 2
-                            ELSE 1
-                        END) AS operation_type,
+                        """ + operation_type_case + """ AS operation_type,
                         rprt.code as partner_responsibility_code,
                         btg.l10n_ar_vat_afip_code,
                         aaat.account_account_tag_id
@@ -291,7 +295,7 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                     LEFT JOIN account_tax bt ON amltr.account_tax_id = bt.id
                     LEFT JOIN account_tax_group btg ON bt.tax_group_id = btg.id
                     WHERE
-                        btg.l10n_ar_vat_afip_code IS NOT NULL AND aml.move_id IN %(move_ids)s
+                        btg.l10n_ar_vat_afip_code IS NOT NULL AND aml.move_id = ANY(%(move_ids)s)
                 )
                 SELECT
                     activity,
@@ -318,15 +322,18 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                 FROM move_lines_with_operation_type
                 GROUP BY activity, operation_type, responsibility_type_code, rate_code
                 ORDER BY activity, operation_type, responsibility_type_code, rate_code;
-                """
-            )
-            query_params = {
-                'exempt_op_type': exempt_operation_type,
-                'move_ids': move_ids,
-            }
-        columns_map["Monto Neto Exento o No Gravado"] = 'exempt_balance'
+            """
 
-        self.env.cr.execute(query, query_params)
+        params = {
+            'exempt_op_type': exempt_operation_type,
+            'move_ids': move_ids_list,
+        }
+        if file_type == 'sale_invoice':
+            params['tag_ids'] = tag_ids_list
+        else:
+            params['code_values'] = code_values
+
+        self.env.cr.execute(query, params)
         data = self.env.cr.dictfetchall()
         exempt_columns = ["Actividad", "Tipo de Operacion", "Monto Neto Exento o No Gravado"]
 
