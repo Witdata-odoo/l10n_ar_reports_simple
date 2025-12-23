@@ -11,13 +11,13 @@ from odoo.tools import SQL
 class L10n_ArTaxReportHandler(models.AbstractModel):
     _inherit = 'l10n_ar.tax.report.handler'
 
-    def _custom_options_initializer(self, report, options, previous_options):
+    def _custom_options_initializer(self, report, options, previous_options=None):
         super()._custom_options_initializer(report, options, previous_options=previous_options)
 
         # Add export button
-        options['buttons'] += [
+        options.setdefault('buttons', []).append(
             {'name': _('Reporte de IVA Simple (ZIP)'), 'sequence': 31, 'action': 'export_file', 'action_param': 'vat_simple_export_files_to_zip', 'file_export_type': _('ZIP')},
-        ]
+        )
 
     ####################################################
     # EXPORT/PRINT
@@ -167,13 +167,14 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                 FROM move_lines_with_concept
                 GROUP BY concept, rate_code
                 ORDER BY concept, rate_code;
-            """,
-            lease_tag_id=self.env.ref("l10n_ar_reports_simple.tag_leases_rentals_account").id,
-            fixed_tag_id=self.env.ref("l10n_ar_reports_simple.tag_fixed_asset_account").id,
-            move_ids=move_ids,
+            """
         )
 
-        self.env.cr.execute(query)
+        self.env.cr.execute(query, {
+            'lease_tag_id': self.env.ref("l10n_ar_reports_simple.tag_leases_rentals_account").id,
+            'fixed_tag_id': self.env.ref("l10n_ar_reports_simple.tag_fixed_asset_account").id,
+            'move_ids': move_ids,
+        })
         data = self.env.cr.dictfetchall()
 
         results = []
@@ -199,43 +200,23 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
         }
         if file_type == 'sale_invoice':
             tag_id = self.env.ref("l10n_ar_reports_simple.tag_fixed_asset_account")
-            operation_type_query = SQL(
-                """
-                (CASE
-                    WHEN btg.l10n_ar_vat_afip_code IN ('0', '1', '2') THEN 3
-                    WHEN aaat.account_account_tag_id IN %(tag_id)s THEN 2
-                    ELSE 1
-                END)
-                """,
-                tag_id=tuple(tag_id.ids),
-            )
             columns_map["Debito Fiscal Facturado"] = 'vat_amount'
             columns_map["Debito Fiscal O.D.P."] = 'vat_amount'
             exempt_operation_type = 3
-        else:
-            operation_type_query = SQL(
+            query = SQL(
                 """
-                (CASE
-                    WHEN btg.l10n_ar_vat_afip_code IN %(code_values)s THEN 2
-                    ELSE 1
-                END)
-                """,
-                code_values=('0', '1', '2'),
-                )
-            columns_map["Debito Fiscal a Restituir"] = 'vat_amount'
-            exempt_operation_type = 2
-        columns_map["Monto Neto Exento o No Gravado"] = 'exempt_balance'
-
-        query = SQL(
-            """
                 WITH move_lines_with_operation_type AS (
                     SELECT
                         aml.*,
                         COALESCE(amlact.code, cmpact.code, '0') AS activity,
-                        %(operation_query)s AS operation_type,
+                        (CASE
+                            WHEN btg.l10n_ar_vat_afip_code IN ('0', '1', '2') THEN 3
+                            WHEN aaat.account_account_tag_id = %(tag_id)s THEN 2
+                            ELSE 1
+                        END) AS operation_type,
                         rprt.code as partner_responsibility_code,
                         btg.l10n_ar_vat_afip_code,
-                        aaat.account_account_tag_id  -- Keep this for operation_query that might need it
+                        aaat.account_account_tag_id
                     FROM account_move_line aml
                     LEFT JOIN account_account acc ON aml.account_id = acc.id
                     LEFT JOIN l10n_ar_arca_activity amlact ON acc.l10n_ar_arca_activity_id = amlact.id
@@ -275,13 +256,77 @@ class L10n_ArTaxReportHandler(models.AbstractModel):
                 FROM move_lines_with_operation_type
                 GROUP BY activity, operation_type, responsibility_type_code, rate_code
                 ORDER BY activity, operation_type, responsibility_type_code, rate_code;
-            """,
-                operation_query=operation_type_query,
-                exempt_op_type=exempt_operation_type,
-                move_ids=move_ids,
+                """
             )
+            query_params = {
+                'tag_id': tag_id.id,
+                'exempt_op_type': exempt_operation_type,
+                'move_ids': move_ids,
+            }
+        else:
+            columns_map["Debito Fiscal a Restituir"] = 'vat_amount'
+            exempt_operation_type = 2
+            query = SQL(
+                """
+                WITH move_lines_with_operation_type AS (
+                    SELECT
+                        aml.*,
+                        COALESCE(amlact.code, cmpact.code, '0') AS activity,
+                        (CASE
+                            WHEN btg.l10n_ar_vat_afip_code IN ('0', '1', '2') THEN 2
+                            ELSE 1
+                        END) AS operation_type,
+                        rprt.code as partner_responsibility_code,
+                        btg.l10n_ar_vat_afip_code,
+                        aaat.account_account_tag_id
+                    FROM account_move_line aml
+                    LEFT JOIN account_account acc ON aml.account_id = acc.id
+                    LEFT JOIN l10n_ar_arca_activity amlact ON acc.l10n_ar_arca_activity_id = amlact.id
+                    LEFT JOIN res_company cmp ON aml.company_id = cmp.id
+                    LEFT JOIN l10n_ar_arca_activity cmpact ON cmp.l10n_ar_arca_activity_id = cmpact.id
+                    LEFT JOIN account_account_account_tag aaat ON acc.id = aaat.account_account_id
+                    LEFT JOIN res_partner rp ON aml.partner_id = rp.id
+                    LEFT JOIN l10n_ar_afip_responsibility_type rprt ON rp.l10n_ar_afip_responsibility_type_id = rprt.id
+                    LEFT JOIN account_move_line_account_tax_rel amltr ON aml.id = amltr.account_move_line_id
+                    LEFT JOIN account_tax bt ON amltr.account_tax_id = bt.id
+                    LEFT JOIN account_tax_group btg ON bt.tax_group_id = btg.id
+                    WHERE
+                        btg.l10n_ar_vat_afip_code IS NOT NULL AND aml.move_id IN %(move_ids)s
+                )
+                SELECT
+                    activity,
+                    operation_type,
+                    operation_type = %(exempt_op_type)s AS is_exempt,
+                    CASE
+                        WHEN operation_type = %(exempt_op_type)s THEN ''
+                        WHEN partner_responsibility_code = '1' THEN '1'
+                        WHEN partner_responsibility_code IN ('6', '13') THEN '2'
+                        WHEN partner_responsibility_code IN ('4', '5', '7', '8', '9', '10', '16') THEN '3'
+                        ELSE ''
+                    END AS responsibility_type_code,
+                    CASE
+                        WHEN operation_type = %(exempt_op_type)s THEN ''
+                        ELSE l10n_ar_vat_afip_code
+                    END AS rate_code,
+                    CASE
+                        WHEN operation_type != %(exempt_op_type)s THEN ''
+                        ELSE REPLACE(ABS(SUM(balance))::TEXT, '.', ',')
+                    END AS exempt_balance,
+                    SUM(balance) AS balance,
+                    ARRAY_AGG(DISTINCT id) as aml_ids,
+                    ARRAY_AGG(DISTINCT move_id) as move_ids
+                FROM move_lines_with_operation_type
+                GROUP BY activity, operation_type, responsibility_type_code, rate_code
+                ORDER BY activity, operation_type, responsibility_type_code, rate_code;
+                """
+            )
+            query_params = {
+                'exempt_op_type': exempt_operation_type,
+                'move_ids': move_ids,
+            }
+        columns_map["Monto Neto Exento o No Gravado"] = 'exempt_balance'
 
-        self.env.cr.execute(query)
+        self.env.cr.execute(query, query_params)
         data = self.env.cr.dictfetchall()
         exempt_columns = ["Actividad", "Tipo de Operacion", "Monto Neto Exento o No Gravado"]
 
